@@ -1,0 +1,7 @@
+#include <windows.h>
+#include "resource.h"
+
+LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
+IDR_IDLE           ICON     "HDD_Idle.ico"
+IDR_BUSY_RED       ICON     "HDD_Red.ico"
+IDR_BUSY_GREEN     ICON     "HDD_Green.ico"

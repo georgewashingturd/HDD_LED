@@ -1,15 +1,317 @@
+#define _WIN32_DCOM
+
 #include <windows.h>
 #include "resource.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <tchar.h>
+
+#include <comdef.h>
+#include <Wbemidl.h>
 
 
+HRESULT                 hr = S_OK;
+IWbemRefresher          *pRefresher = NULL;
+IWbemConfigureRefresher *pConfig = NULL;
+IWbemHiPerfEnum         *pEnum = NULL;
+IWbemServices           *pNameSpace = NULL;
+IWbemLocator            *pWbemLocator = NULL;
+IWbemObjectAccess       **apEnumAccess = NULL;
+BSTR                    bstrNameSpace = NULL;
+long                    lID = 0;
+DWORD                   dwNumReturned = 0;
 
-typedef int ( __cdecl * _MyInitCom) (void);
-typedef void ( __cdecl * _MyUninitCom) (void);
-typedef int ( __cdecl * _GetDiskPerfData) (DWORD * dwDiskBytesPerSec, DWORD * dwDiskReadBytesPerSec,DWORD * dwDiskWriteBytesPerSec);
+void MyUninitCom(void)
+{
+	if (NULL != bstrNameSpace)
+    {
+        SysFreeString(bstrNameSpace);
+    }
 
-_MyInitCom MyInitCom;
-_MyUninitCom MyUninitCom;
-_GetDiskPerfData GetDiskPerfData;
+    if (NULL != apEnumAccess)
+    {
+        for (DWORD i = 0; i < dwNumReturned; i++)
+        {
+            if (apEnumAccess[i] != NULL)
+            {
+                apEnumAccess[i]->Release();
+                apEnumAccess[i] = NULL;
+            }
+        }
+        delete [] apEnumAccess;
+    }
+    if (NULL != pWbemLocator)
+    {
+        pWbemLocator->Release();
+    }
+    if (NULL != pNameSpace)
+    {
+        pNameSpace->Release();
+    }
+    if (NULL != pEnum)
+    {
+        pEnum->Release();
+    }
+    if (NULL != pConfig)
+    {
+        pConfig->Release();
+    }
+    if (NULL != pRefresher)
+    {
+        pRefresher->Release();
+    }
+
+    CoUninitialize();
+
+    if (FAILED (hr))
+    {
+        wprintf (L"Error status=%08x\n",hr);
+    }
+}
+
+int MyInitCom(void)
+{
+	    if (FAILED (hr = CoInitializeEx(NULL,COINIT_MULTITHREADED)))
+    {
+        goto CLEANUP;
+    }
+
+    if (FAILED (hr = CoInitializeSecurity(
+        NULL,
+        -1,
+        NULL,
+        NULL,
+        RPC_C_AUTHN_LEVEL_NONE,
+        RPC_C_IMP_LEVEL_IMPERSONATE,
+        NULL, EOAC_NONE, 0)))
+    {
+        goto CLEANUP;
+    }
+
+    if (FAILED (hr = CoCreateInstance(
+        CLSID_WbemLocator, 
+        NULL,
+        CLSCTX_INPROC_SERVER,
+        IID_IWbemLocator,
+        (void**) &pWbemLocator)))
+    {
+        goto CLEANUP;
+    }
+
+    // Connect to the desired namespace.
+    bstrNameSpace = SysAllocString(L"\\\\.\\root\\cimv2");
+    if (NULL == bstrNameSpace)
+    {
+        hr = E_OUTOFMEMORY;
+        goto CLEANUP;
+    }
+    if (FAILED (hr = pWbemLocator->ConnectServer(
+        bstrNameSpace,
+        NULL, // User name
+        NULL, // Password
+        NULL, // Locale
+        0L,   // Security flags
+        NULL, // Authority
+        NULL, // Wbem context
+        &pNameSpace)))
+    {
+        goto CLEANUP;
+    }
+    pWbemLocator->Release();
+    pWbemLocator=NULL;
+    SysFreeString(bstrNameSpace);
+    bstrNameSpace = NULL;
+
+    if (FAILED (hr = CoCreateInstance(
+        CLSID_WbemRefresher,
+        NULL,
+        CLSCTX_INPROC_SERVER,
+        IID_IWbemRefresher, 
+        (void**) &pRefresher)))
+    {
+        goto CLEANUP;
+    }
+
+    if (FAILED (hr = pRefresher->QueryInterface(
+        IID_IWbemConfigureRefresher,
+        (void **)&pConfig)))
+    {
+        goto CLEANUP;
+    }
+
+	// Add an enumerator to the refresher.
+    if (FAILED (hr = pConfig->AddEnum(
+        pNameSpace, 
+        L"Win32_PerfFormattedData_PerfDisk_PhysicalDisk", 
+        0, 
+        NULL, 
+        &pEnum, 
+        &lID)))
+    {
+        goto CLEANUP;
+    }
+    pConfig->Release();
+    pConfig = NULL;
+
+	return 0;
+
+CLEANUP:
+	MyUninitCom();
+
+	return -1;
+}
+
+int GetDiskPerfData(DWORD * dwDiskBytesPerSec, DWORD * dwDiskReadBytesPerSec,DWORD * dwDiskWriteBytesPerSec)
+{
+	// To add error checking,
+    // check returned HRESULT below where collected.
+
+    long                    lDiskBytesPerSecHandle = 0;
+    long                    lDiskReadBytesPerSecHandle = 0;
+    long                    lDiskWriteBytesPerSecHandle = 0;
+    DWORD                   dwNumObjects = 0;
+    DWORD                   i=0;
+    int                     x=0;
+
+	*dwDiskBytesPerSec = 0;
+	*dwDiskReadBytesPerSec = 0;
+	*dwDiskWriteBytesPerSec = 0;
+
+    
+
+    // Get a property handle for the VirtualBytes property.
+
+    // Refresh the object ten times and retrieve the value.
+    for(x = 0; x < 1; x++)
+    {
+        dwNumReturned = 0;
+        dwNumObjects = 0;
+
+        if (FAILED (hr =pRefresher->Refresh(0L)))
+        {
+            goto CLEANUP;
+        }
+
+        hr = pEnum->GetObjects(0L, 
+            dwNumObjects, 
+            apEnumAccess, 
+            &dwNumReturned);
+        // If the buffer was not big enough,
+        // allocate a bigger buffer and retry.
+        if (hr == WBEM_E_BUFFER_TOO_SMALL 
+            && dwNumReturned > dwNumObjects)
+        {
+            apEnumAccess = new IWbemObjectAccess*[dwNumReturned];
+            if (NULL == apEnumAccess)
+            {
+                hr = E_OUTOFMEMORY;
+                goto CLEANUP;
+            }
+            SecureZeroMemory(apEnumAccess,
+                dwNumReturned*sizeof(IWbemObjectAccess*));
+            dwNumObjects = dwNumReturned;
+
+            if (FAILED (hr = pEnum->GetObjects(0L, 
+                dwNumObjects, 
+                apEnumAccess, 
+                &dwNumReturned)))
+            {
+                goto CLEANUP;
+            }
+        }
+        else
+        {
+            if (hr == WBEM_S_NO_ERROR)
+            {
+                hr = WBEM_E_NOT_FOUND;
+                goto CLEANUP;
+            }
+        }
+
+        // First time through, get the handles.
+        if (0 == x)
+        {
+            CIMTYPE DiskBytesPerSecType;
+            if (FAILED (hr = apEnumAccess[0]->GetPropertyHandle(
+                L"DiskBytesPerSec",
+                &DiskBytesPerSecType,
+                &lDiskBytesPerSecHandle)))
+            {
+                goto CLEANUP;
+            }
+            CIMTYPE DiskReadBytesPerSecType;
+            if (FAILED (hr = apEnumAccess[0]->GetPropertyHandle(
+                L"DiskReadBytesPerSec",
+                &DiskReadBytesPerSecType,
+                &lDiskReadBytesPerSecHandle)))
+            {
+                goto CLEANUP;
+            }
+            CIMTYPE DiskWriteBytesPerSecType;
+            if (FAILED (hr = apEnumAccess[0]->GetPropertyHandle(
+                L"DiskWriteBytesPerSec",
+                &DiskWriteBytesPerSecType,
+                &lDiskWriteBytesPerSecHandle)))
+            {
+                goto CLEANUP;
+            }
+        }
+           
+        for (i = 0; i < dwNumReturned; i++)
+        {
+            DWORD temp;
+            if (FAILED (hr = apEnumAccess[i]->ReadDWORD(
+                lDiskBytesPerSecHandle,
+                &temp)))
+            {
+                goto CLEANUP;
+            }
+            *dwDiskBytesPerSec = *dwDiskBytesPerSec + temp;
+			if (FAILED (hr = apEnumAccess[i]->ReadDWORD(
+                lDiskReadBytesPerSecHandle,
+                &temp)))
+            {
+                goto CLEANUP;
+            }
+            *dwDiskReadBytesPerSec = *dwDiskReadBytesPerSec + temp;
+			if (FAILED (hr = apEnumAccess[i]->ReadDWORD(
+                lDiskWriteBytesPerSecHandle,
+                &temp)))
+            {
+                goto CLEANUP;
+            }
+            *dwDiskWriteBytesPerSec = *dwDiskWriteBytesPerSec + temp;
+
+            //wprintf(L"Disk is using %lu %lu %lu %lu\n",
+            //    *dwDiskBytesPerSec,*dwDiskReadBytesPerSec+*dwDiskWriteBytesPerSec,*dwDiskReadBytesPerSec,*dwDiskWriteBytesPerSec);
+
+            // Done with the object
+            apEnumAccess[i]->Release();
+            apEnumAccess[i] = NULL;
+        }
+
+        if (NULL != apEnumAccess)
+        {
+            delete [] apEnumAccess;
+            apEnumAccess = NULL;
+        }
+
+       // Sleep for a second.
+       //Sleep(1000);
+    }
+
+// exit loop here
+
+	return 0;
+CLEANUP:
+
+    MyUninitCom();
+
+	return -1;
+}
+
+
+// ======================================================
 
 LPCTSTR szAppName = TEXT("HDD LED");
 LPCTSTR szWndName = TEXT("HDD LED");
@@ -92,7 +394,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 		Shell_NotifyIcon(NIM_ADD, &nid);
 		hmenu = CreatePopupMenu();//Create menu
 		
-		AppendMenu(hmenu, MF_STRING, IDR_INFO,"MinGW version of Codegasm 6 HDD LED");
+		AppendMenu(hmenu, MF_STRING, IDR_INFO,"MinGW w64 version of Codegasm 6 HDD LED");
         AppendMenu(hmenu, MF_STRING, IDR_QUIT,"Quit"); // add two options for the menu
         
         greenicon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(IDR_BUSY_GREEN));
@@ -110,7 +412,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         
 	case WM_USER: //Continuous use of the procedure when the news
 		if (lParam == WM_LBUTTONDOWN)
-			MessageBox(NULL, TEXT("You can exit the double-click the tray!"), szAppName, MB_OK);
+			MessageBox(NULL, TEXT("You can exit by double-clicking the tray!"), szAppName, MB_OK);
         
 		if (lParam == WM_LBUTTONDBLCLK)//Double click on the tray news, exit
 			SendMessage(hwnd, WM_CLOSE, wParam, lParam);
@@ -153,31 +455,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 				   LPSTR szCmdLine, int iCmdShow)
 {
-    HINSTANCE wmidll;
 	HWND hwnd;
 	MSG msg;
 	WNDCLASS wndclass;
 
-    if ((wmidll = LoadLibrary("WMI_DLL.dll")) == NULL)
-    {
-        MessageBox(NULL, TEXT("Error loading WMI_DLL.dll"), szAppName, MB_ICONERROR);
-        return 0;
-    }
-    
-    if ((MyInitCom = (_MyInitCom) GetProcAddress(wmidll, "MyInitCom")) == NULL ||
-        (MyUninitCom = (_MyUninitCom) GetProcAddress(wmidll, "MyUninitCom")) == NULL ||
-        (GetDiskPerfData = (_GetDiskPerfData) GetProcAddress(wmidll, "GetDiskPerfData")) == NULL )
-    {
-        MessageBox(NULL, TEXT("Error function addresses from WMI_DLL.dll"), szAppName, MB_ICONERROR);
-        return 0;
-    }
-    
     if (MyInitCom() != 0)
     {
         MessageBox(NULL, TEXT("Error initting COM"), szAppName, MB_ICONERROR);
         return 0;
     }
-
+    
 	HWND handle = FindWindow(NULL, szWndName);
 	if (handle != NULL)
 	{
